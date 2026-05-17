@@ -1,0 +1,939 @@
+﻿-- WHITELIST SYSTEM
+local WHITELISTED_USERS = {
+    "cortez122334",          -- Your main
+    "Lavaboysavage4",        -- Your alt
+    "imgood21265",           -- Example user  -- Added missing comma here
+    "barre1617"
+}
+
+-- Check if user is whitelisted
+local function isUserWhitelisted(username)
+    for _, whitelistedUser in ipairs(WHITELISTED_USERS) do
+        if string.lower(username) == string.lower(whitelistedUser) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Get local player
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local playerName = LocalPlayer.Name
+
+-- Check whitelist
+if not isUserWhitelisted(playerName) then
+    task.wait(1)
+    LocalPlayer:Kick("TOUHINI HUB V2 - NOT WHITELISTED!")
+    return
+end
+
+print("User " .. playerName .. " is whitelisted. Loading script...")
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local CoreGui = game:GetService("CoreGui")
+local StarterGui = game:GetService("StarterGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+
+local player = Players.LocalPlayer
+
+-- TP Positions
+local pos1 = Vector3.new(-352.98, -7, 74.30)            
+local pos2 = Vector3.new(-352.98, -6.49, 45.76)   
+local standing1 = Vector3.new(-336.36, -4.59, 99.51)
+local standing2 = Vector3.new(-334.81, -4.59, 18.90)
+
+-- Teleport sequences
+local spot1_sequence = {
+    CFrame.new(-370.810913, -7.00000334, 41.2687263, 0.99984771, 1.22364419e-09, 0.0174523517, -6.54859778e-10, 1, -3.2596418e-08, -0.0174523517, 3.25800258e-08, 0.99984771),
+    CFrame.new(-336.355286, -5.10107088, 17.2327671, -0.999883354, -2.76150569e-08, 0.0152716246, -2.88224964e-08, 1, -7.88441525e-08, -0.0152716246, -7.9275118e-08, -0.999883354)
+}
+
+local spot2_sequence = {
+    CFrame.new(-354.782867, -7.00000334, 92.8209305, -0.999997616, -1.11891862e-09, -0.00218066527, -1.11958298e-09, 1, 3.03415071e-10, 0.00218066527, 3.05855785e-10, -0.999997616),
+    CFrame.new(-336.942902, -5.10106993, 99.3276443, 0.999914348, -3.63984611e-08, 0.0130875716, 3.67094941e-08, 1, -2.35254749e-08, -0.0130875716, 2.40038975e-08, 0.999914348)
+}
+
+-- Clean up existing GUI
+if CoreGui:FindFirstChild("TOUHINI_HUB_V2") then 
+    CoreGui["TOUHINI_HUB_V2"]:Destroy() 
+end
+
+-- Create main GUI
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TOUHINI_HUB_V2"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = CoreGui
+
+-- ============================================================
+-- AUTO STEAL SYSTEM
+-- ============================================================
+
+local AnimalsData = require(ReplicatedStorage:WaitForChild("Datas"):WaitForChild("Animals"))
+
+local allAnimalsCache = {}
+local PromptMemoryCache = {}
+local InternalStealCache = {}
+
+local IsStealing = false
+local StealProgress = 0
+local CurrentStealTarget = nil
+
+local AUTO_STEAL_PROX_RADIUS = 200
+
+local function getHRP()
+    local char = player.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso")
+end
+
+local function isMyBase(plotName)
+    local plot = workspace.Plots:FindFirstChild(plotName)
+    if not plot then return false end
+    local sign = plot:FindFirstChild("PlotSign")
+    return sign and sign:FindFirstChild("YourBase") and sign.YourBase.Enabled
+end
+
+local function scanSinglePlot(plot)
+    if not plot or not plot:IsA("Model") or isMyBase(plot.Name) then return end
+    local podiums = plot:FindFirstChild("AnimalPodiums")
+    if not podiums then return end
+
+    for _, podium in ipairs(podiums:GetChildren()) do
+        if podium:IsA("Model") and podium:FindFirstChild("Base") then
+            table.insert(allAnimalsCache, {
+                plot = plot.Name,
+                slot = podium.Name,
+                worldPosition = podium:GetPivot().Position,
+                uid = plot.Name .. "_" .. podium.Name,
+            })
+        end
+    end
+end
+
+local function initializeScanner()
+    task.wait(2)
+    local plots = workspace:WaitForChild("Plots", 10)
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        scanSinglePlot(plot)
+    end
+
+    plots.ChildAdded:Connect(scanSinglePlot)
+
+    task.spawn(function()
+        while task.wait(5) do
+            table.clear(allAnimalsCache)
+            for _, plot in ipairs(plots:GetChildren()) do
+                scanSinglePlot(plot)
+            end
+        end
+    end)
+end
+
+local function findPrompt(animal)
+    local cached = PromptMemoryCache[animal.uid]
+    if cached and cached.Parent then return cached end
+
+    local plot = workspace.Plots:FindFirstChild(animal.plot)
+    local podium = plot and plot.AnimalPodiums:FindFirstChild(animal.slot)
+    local prompt = podium and podium.Base.Spawn.PromptAttachment:FindFirstChildOfClass("ProximityPrompt")
+
+    if prompt then
+        PromptMemoryCache[animal.uid] = prompt
+    end
+
+    return prompt
+end
+
+local function buildStealCallbacks(prompt)
+    if InternalStealCache[prompt] then return end
+
+    local data = { holdCallbacks = {}, triggerCallbacks = {}, ready = true }
+
+    local ok1, conns1 = pcall(getconnections, prompt.PromptButtonHoldBegan)
+    if ok1 then
+        for _, c in ipairs(conns1) do
+            table.insert(data.holdCallbacks, c.Function)
+        end
+    end
+
+    local ok2, conns2 = pcall(getconnections, prompt.Triggered)
+    if ok2 then
+        for _, c in ipairs(conns2) do
+            table.insert(data.triggerCallbacks, c.Function)
+        end
+    end
+
+    InternalStealCache[prompt] = data
+end
+
+local function executeInternalStealAsync(prompt, animalData, useSpot2)
+    local data = InternalStealCache[prompt]
+    if not data or not data.ready or IsStealing then return end
+
+    data.ready = false
+    IsStealing = true
+    StealProgress = 0
+    CurrentStealTarget = animalData
+
+    local tpDone = false
+    local sequence = useSpot2 and spot2_sequence or spot1_sequence
+
+    task.spawn(function()
+        for _, fn in ipairs(data.holdCallbacks) do
+            task.spawn(fn)
+        end
+
+        local startTime = tick()
+        while tick() - startTime < 1.3 do
+            StealProgress = (tick() - startTime) / 1.3
+
+            if StealProgress >= 0.73 and not tpDone then
+                tpDone = true
+                local hrp = getHRP()
+                if hrp then
+                    hrp.CFrame = sequence[1]
+                    task.wait(0.1)
+                    hrp.CFrame = sequence[2]
+                    task.wait(0.2)
+
+                    local d1 = (hrp.Position - pos1).Magnitude
+                    local d2 = (hrp.Position - pos2).Magnitude
+                    hrp.CFrame = CFrame.new(d1 < d2 and pos1 or pos2)
+                end
+            end
+
+            task.wait()
+        end
+
+        StealProgress = 1
+        for _, fn in ipairs(data.triggerCallbacks) do
+            task.spawn(fn)
+        end
+
+        task.wait(0.2)
+        data.ready = true
+
+        IsStealing = false
+        StealProgress = 0
+        CurrentStealTarget = nil
+    end)
+end
+
+local function getNearestAnimal()
+    local hrp = getHRP()
+    if not hrp then return nil end
+
+    local nearest, dist = nil, math.huge
+    for _, animal in ipairs(allAnimalsCache) do
+        local d = (hrp.Position - animal.worldPosition).Magnitude
+        if d < dist and d <= AUTO_STEAL_PROX_RADIUS then
+            dist = d
+            nearest = animal
+        end
+    end
+    return nearest
+end
+
+-- ============================================================
+-- AUTO STEAL PROGRESS BAR
+-- ============================================================
+
+local function createAutoStealBar()
+    local barGui = Instance.new("ScreenGui")
+    barGui.Name = "AutoStealBar"
+    barGui.ResetOnSpawn = false
+    barGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    barGui.Parent = CoreGui
+
+    local barContainer = Instance.new("Frame")
+    barContainer.Name = "BarContainer"
+    barContainer.Size = UDim2.new(0, 300, 0, 45)
+    barContainer.Position = UDim2.new(0.5, -150, 1, -100)
+    barContainer.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    barContainer.BackgroundTransparency = 0
+    barContainer.BorderSizePixel = 0
+    barContainer.Parent = barGui
+
+    Instance.new("UICorner", barContainer).CornerRadius = UDim.new(0, 10)
+
+    local barStroke = Instance.new("UIStroke", barContainer)
+    barStroke.Thickness = 3
+
+    local rainbowGradient = Instance.new("UIGradient")
+    rainbowGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 0, 0)),
+        ColorSequenceKeypoint.new(0.16, Color3.fromRGB(255, 165, 0)),
+        ColorSequenceKeypoint.new(0.33, Color3.fromRGB(255, 255, 0)),
+        ColorSequenceKeypoint.new(0.50, Color3.fromRGB(0, 255, 0)),
+        ColorSequenceKeypoint.new(0.66, Color3.fromRGB(0, 255, 255)),
+        ColorSequenceKeypoint.new(0.83, Color3.fromRGB(0, 0, 255)),
+        ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 0, 255))
+    })
+    rainbowGradient.Rotation = 0
+    rainbowGradient.Parent = barStroke
+
+    task.spawn(function()
+        while barStroke and barStroke.Parent do
+            for i = 0, 360, 2 do
+                rainbowGradient.Rotation = i
+                task.wait(0.02)
+            end
+        end
+    end)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 18)
+    title.Position = UDim2.new(0, 0, 0, 3)
+    title.BackgroundTransparency = 1
+    title.Text = "AUTO STEAL"
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 14
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextXAlignment = Enum.TextXAlignment.Center
+    title.Parent = barContainer
+
+    local progressBg = Instance.new("Frame")
+    progressBg.Size = UDim2.new(0.85, 0, 0, 16)
+    progressBg.Position = UDim2.new(0.075, 0, 0, 23)
+    progressBg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    progressBg.BorderSizePixel = 0
+    progressBg.Parent = barContainer
+
+    Instance.new("UICorner", progressBg).CornerRadius = UDim.new(1, 0)
+
+    local progressFill = Instance.new("Frame")
+    progressFill.Name = "ProgressFill"
+    progressFill.Size = UDim2.new(0, 0, 1, 0)
+    progressFill.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+    progressFill.BorderSizePixel = 0
+    progressFill.Parent = progressBg
+    progressFill.ClipsDescendants = false
+
+    Instance.new("UICorner", progressFill).CornerRadius = UDim.new(1, 0)
+
+    local percentText = Instance.new("TextLabel")
+    percentText.Name = "PercentText"
+    percentText.Size = UDim2.new(0, 45, 0, 18)
+    percentText.Position = UDim2.new(1, -50, 0, 3)
+    percentText.BackgroundTransparency = 1
+    percentText.Text = "0%"
+    percentText.Font = Enum.Font.GothamBold
+    percentText.TextSize = 14
+    percentText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    percentText.TextXAlignment = Enum.TextXAlignment.Right
+    percentText.Parent = barContainer
+
+    local function updateFillColor(percent)
+        if percent < 16 then
+            progressFill.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+        elseif percent < 33 then
+            progressFill.BackgroundColor3 = Color3.fromRGB(255, 165, 0)
+        elseif percent < 50 then
+            progressFill.BackgroundColor3 = Color3.fromRGB(255, 255, 0)
+        elseif percent < 66 then
+            progressFill.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+        elseif percent < 83 then
+            progressFill.BackgroundColor3 = Color3.fromRGB(0, 255, 255)
+        else
+            progressFill.BackgroundColor3 = Color3.fromRGB(0, 0, 255)
+        end
+    end
+
+    return {
+        gui = barGui,
+        container = barContainer,
+        progressFill = progressFill,
+        percentText = percentText,
+        updateFillColor = updateFillColor
+    }
+end
+
+local autoStealBar = createAutoStealBar()
+
+task.spawn(function()
+    while true do
+        if IsStealing then
+            autoStealBar.container.Visible = true
+            local percent = math.floor(StealProgress * 100 + 0.5)
+            autoStealBar.percentText.Text = percent .. "%"
+            autoStealBar.updateFillColor(percent)
+            TweenService:Create(autoStealBar.progressFill, TweenInfo.new(0.05), {
+                Size = UDim2.new(StealProgress, 0, 1, 0)
+            }):Play()
+        else
+            autoStealBar.container.Visible = false
+        end
+        task.wait(0.05)
+    end
+end)
+
+-- ============================================================
+-- KICK BUTTON FUNCTION
+-- ============================================================
+
+local function kickSelf()
+    local message = "kicked You probably stole their pet"
+    LocalPlayer:Kick(message)
+end
+
+-- ============================================================
+-- MAIN UI - TOUHINI HUB V2 (NEW LAYOUT WITH RAINBOW GLOW)
+-- ============================================================
+
+local themeColors = {
+    bg = Color3.fromRGB(0, 0, 0),
+    card = Color3.fromRGB(15, 15, 15),
+    white = Color3.fromRGB(255, 255, 255),
+    green = Color3.fromRGB(0, 200, 0),
+    red = Color3.fromRGB(220, 60, 60)
+}
+
+-- Main Container
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 320, 0, 240)
+mainFrame.Position = UDim2.new(1, -340, 0.5, -120)
+mainFrame.BackgroundColor3 = themeColors.bg
+mainFrame.BackgroundTransparency = 0
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+mainFrame.Parent = screenGui
+
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
+
+-- Rainbow glow stroke (THICKER AND MORE VISIBLE)
+local mainStroke = Instance.new("UIStroke", mainFrame)
+mainStroke.Thickness = 5
+mainStroke.Transparency = 0
+
+-- Enhanced rainbow gradient with more vibrant colors
+local rainbowGradient = Instance.new("UIGradient")
+rainbowGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 0, 0)),
+    ColorSequenceKeypoint.new(0.14, Color3.fromRGB(255, 128, 0)),
+    ColorSequenceKeypoint.new(0.28, Color3.fromRGB(255, 255, 0)),
+    ColorSequenceKeypoint.new(0.42, Color3.fromRGB(128, 255, 0)),
+    ColorSequenceKeypoint.new(0.56, Color3.fromRGB(0, 255, 0)),
+    ColorSequenceKeypoint.new(0.70, Color3.fromRGB(0, 255, 255)),
+    ColorSequenceKeypoint.new(0.84, Color3.fromRGB(0, 128, 255)),
+    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 0, 255))
+})
+rainbowGradient.Rotation = 0
+rainbowGradient.Parent = mainStroke
+
+-- Animate the rainbow glow
+task.spawn(function()
+    while mainStroke and mainStroke.Parent do
+        for i = 0, 360, 2 do
+            rainbowGradient.Rotation = i
+            task.wait(0.01)
+        end
+    end
+end)
+
+-- Header (shorter)
+local header = Instance.new("TextButton")
+header.Name = "Header"
+header.Size = UDim2.new(1, 0, 0, 35)
+header.BackgroundColor3 = themeColors.card
+header.BackgroundTransparency = 0
+header.BorderSizePixel = 0
+header.Text = ""
+header.AutoButtonColor = false
+header.Parent = mainFrame
+
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
+
+-- Discord invite
+local discordLabel = Instance.new("TextLabel")
+discordLabel.Name = "DiscordInvite"
+discordLabel.Parent = header
+discordLabel.BackgroundTransparency = 1
+discordLabel.Position = UDim2.new(0, 15, 0, 3)
+discordLabel.Size = UDim2.new(1, -30, 0, 14)
+discordLabel.Text = "DISCORD: discord.gg/zCzThQ3C"
+discordLabel.Font = Enum.Font.GothamBold
+discordLabel.TextSize = 10
+discordLabel.TextColor3 = themeColors.white
+discordLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Title
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.Parent = header
+title.BackgroundTransparency = 1
+title.Position = UDim2.new(0, 15, 0, 17)
+title.Size = UDim2.new(1, -30, 1, -17)
+title.Text = "TOUHINI HUB V2"
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 16
+title.TextColor3 = themeColors.white
+title.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Main content frame (new layout)
+local contentFrame = Instance.new("Frame")
+contentFrame.Name = "ContentFrame"
+contentFrame.Size = UDim2.new(1, -20, 1, -45)
+contentFrame.Position = UDim2.new(0, 10, 0, 40)
+contentFrame.BackgroundTransparency = 1
+contentFrame.Parent = mainFrame
+
+-- Left column (toggles)
+local leftColumn = Instance.new("Frame")
+leftColumn.Name = "LeftColumn"
+leftColumn.Size = UDim2.new(0.5, -5, 1, 0)
+leftColumn.Position = UDim2.new(0, 0, 0, 0)
+leftColumn.BackgroundTransparency = 1
+leftColumn.Parent = contentFrame
+
+-- Right column (buttons)
+local rightColumn = Instance.new("Frame")
+rightColumn.Name = "RightColumn"
+rightColumn.Size = UDim2.new(0.5, -5, 1, 0)
+rightColumn.Position = UDim2.new(0.5, 5, 0, 0)
+rightColumn.BackgroundTransparency = 1
+rightColumn.Parent = contentFrame
+
+-- Function to create toggle (compact)
+local function createToggle(parent, name, text, yPos)
+    local toggle = Instance.new("TextButton")
+    toggle.Name = name
+    toggle.Size = UDim2.new(1, 0, 0, 24)
+    toggle.Position = UDim2.new(0, 0, 0, yPos)
+    toggle.BackgroundColor3 = themeColors.card
+    toggle.BackgroundTransparency = 0
+    toggle.BorderSizePixel = 0
+    toggle.Text = ""
+    toggle.AutoButtonColor = false
+    toggle.Parent = parent
+    
+    Instance.new("UICorner", toggle).CornerRadius = UDim.new(0, 6)
+    
+    local label = Instance.new("TextLabel")
+    label.Name = "Label"
+    label.Parent = toggle
+    label.BackgroundTransparency = 1
+    label.Position = UDim2.new(0, 8, 0, 0)
+    label.Size = UDim2.new(1, -45, 1, 0)
+    label.Text = text
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 11
+    label.TextColor3 = themeColors.white
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    
+    local switch = Instance.new("Frame")
+    switch.Name = "Switch"
+    switch.Parent = toggle
+    switch.Size = UDim2.new(0, 32, 0, 14)
+    switch.Position = UDim2.new(1, -38, 0.5, -7)
+    switch.BackgroundColor3 = themeColors.red
+    switch.BorderSizePixel = 0
+    
+    Instance.new("UICorner", switch).CornerRadius = UDim.new(0, 7)
+    
+    local knob = Instance.new("Frame")
+    knob.Name = "Knob"
+    knob.Parent = switch
+    knob.Size = UDim2.new(0, 10, 0, 10)
+    knob.Position = UDim2.new(0, 2, 0.5, -5)
+    knob.BackgroundColor3 = themeColors.white
+    knob.BorderSizePixel = 0
+    
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(0, 5)
+    
+    return toggle, switch, knob
+end
+
+-- Update toggle UI function
+local function updateToggleUI(toggleFrame, knob, isEnabled)
+    TweenService:Create(toggleFrame, TweenInfo.new(0.2), {
+        BackgroundColor3 = isEnabled and themeColors.green or themeColors.red
+    }):Play()
+    
+    TweenService:Create(knob, TweenInfo.new(0.2), {
+        Position = isEnabled and UDim2.new(1, -12, 0.5, -5) or UDim2.new(0, 2, 0.5, -5)
+    }):Play()
+end
+
+-- Create toggles in left column
+local semiTPEnabled = false
+local autoPotionEnabled = false
+
+local halfTpToggle, halfTpSwitch, halfTpKnob = createToggle(leftColumn, "HalfTpToggle", "HALF TP", 0)
+local autoPotionToggle, autoPotionSwitch, autoPotionKnob = createToggle(leftColumn, "AutoPotionToggle", "POTION", 28)
+
+-- Initialize toggles
+task.spawn(function()
+    task.wait(1)
+    halfTpSwitch.BackgroundColor3 = themeColors.red
+    halfTpKnob.Position = UDim2.new(0, 2, 0.5, -5)
+    autoPotionSwitch.BackgroundColor3 = themeColors.red
+    autoPotionKnob.Position = UDim2.new(0, 2, 0.5, -5)
+end)
+
+-- Toggle functionality
+halfTpToggle.MouseButton1Click:Connect(function()
+    semiTPEnabled = not semiTPEnabled
+    updateToggleUI(halfTpSwitch, halfTpKnob, semiTPEnabled)
+end)
+
+autoPotionToggle.MouseButton1Click:Connect(function()
+    autoPotionEnabled = not autoPotionEnabled
+    updateToggleUI(autoPotionSwitch, autoPotionKnob, autoPotionEnabled)
+end)
+
+-- Create buttons in right column
+local buttonSize = 45
+local buttonSpacing = 5
+
+-- AUTO TP LEFT BUTTON
+local autoTpLeftButton = Instance.new("TextButton")
+autoTpLeftButton.Name = "AutoTpLeftButton"
+autoTpLeftButton.Size = UDim2.new(1, 0, 0, buttonSize)
+autoTpLeftButton.Position = UDim2.new(0, 0, 0, 0)
+autoTpLeftButton.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+autoTpLeftButton.BackgroundTransparency = 0
+autoTpLeftButton.BorderSizePixel = 0
+autoTpLeftButton.Text = "TP LEFT"
+autoTpLeftButton.Font = Enum.Font.GothamBlack
+autoTpLeftButton.TextSize = 12
+autoTpLeftButton.TextColor3 = themeColors.white
+autoTpLeftButton.AutoButtonColor = true
+autoTpLeftButton.Parent = rightColumn
+
+Instance.new("UICorner", autoTpLeftButton).CornerRadius = UDim.new(0, 6)
+
+-- AUTO TP RIGHT BUTTON
+local autoTpRightButton = Instance.new("TextButton")
+autoTpRightButton.Name = "AutoTpRightButton"
+autoTpRightButton.Size = UDim2.new(1, 0, 0, buttonSize)
+autoTpRightButton.Position = UDim2.new(0, 0, 0, buttonSize + buttonSpacing)
+autoTpRightButton.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+autoTpRightButton.BackgroundTransparency = 0
+autoTpRightButton.BorderSizePixel = 0
+autoTpRightButton.Text = "TP RIGHT"
+autoTpRightButton.Font = Enum.Font.GothamBlack
+autoTpRightButton.TextSize = 12
+autoTpRightButton.TextColor3 = themeColors.white
+autoTpRightButton.AutoButtonColor = true
+autoTpRightButton.Parent = rightColumn
+
+Instance.new("UICorner", autoTpRightButton).CornerRadius = UDim.new(0, 6)
+
+-- KICK BUTTON
+local kickButton = Instance.new("TextButton")
+kickButton.Name = "KickButton"
+kickButton.Size = UDim2.new(1, 0, 0, buttonSize)
+kickButton.Position = UDim2.new(0, 0, 0, (buttonSize + buttonSpacing) * 2)
+kickButton.BackgroundColor3 = Color3.fromRGB(80, 0, 0)
+kickButton.BackgroundTransparency = 0
+kickButton.BorderSizePixel = 0
+kickButton.Text = "KICK"
+kickButton.Font = Enum.Font.GothamBlack
+kickButton.TextSize = 12
+kickButton.TextColor3 = themeColors.white
+kickButton.AutoButtonColor = true
+kickButton.Parent = rightColumn
+
+Instance.new("UICorner", kickButton).CornerRadius = UDim.new(0, 6)
+
+-- PODIUM BUTTON
+local podiumButton = Instance.new("TextButton")
+podiumButton.Name = "PodiumButton"
+podiumButton.Size = UDim2.new(1, 0, 0, buttonSize)
+podiumButton.Position = UDim2.new(0, 0, 0, (buttonSize + buttonSpacing) * 3)
+podiumButton.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+podiumButton.BackgroundTransparency = 0
+podiumButton.BorderSizePixel = 0
+podiumButton.Text = "PODIUM ▼"
+podiumButton.Font = Enum.Font.GothamBlack
+podiumButton.TextSize = 12
+podiumButton.TextColor3 = themeColors.white
+podiumButton.AutoButtonColor = true
+podiumButton.Parent = rightColumn
+
+Instance.new("UICorner", podiumButton).CornerRadius = UDim.new(0, 6)
+
+-- Dropdown for podium options
+local podiumDropdown = Instance.new("Frame")
+podiumDropdown.Name = "PodiumDropdown"
+podiumDropdown.Size = UDim2.new(1, 0, 0, 58)
+podiumDropdown.Position = UDim2.new(0, 0, 0, (buttonSize + buttonSpacing) * 3)
+podiumDropdown.BackgroundTransparency = 1
+podiumDropdown.Visible = false
+podiumDropdown.Parent = rightColumn
+
+local podiumLeftBtn = Instance.new("TextButton")
+podiumLeftBtn.Size = UDim2.new(1, 0, 0, 26)
+podiumLeftBtn.Position = UDim2.new(0, 0, 0, 0)
+podiumLeftBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+podiumLeftBtn.Text = "LEFT"
+podiumLeftBtn.Font = Enum.Font.GothamBold
+podiumLeftBtn.TextSize = 11
+podiumLeftBtn.TextColor3 = themeColors.white
+podiumLeftBtn.Parent = podiumDropdown
+Instance.new("UICorner", podiumLeftBtn).CornerRadius = UDim.new(0, 5)
+
+local podiumRightBtn = Instance.new("TextButton")
+podiumRightBtn.Size = UDim2.new(1, 0, 0, 26)
+podiumRightBtn.Position = UDim2.new(0, 0, 0, 30)
+podiumRightBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
+podiumRightBtn.Text = "RIGHT"
+podiumRightBtn.Font = Enum.Font.GothamBold
+podiumRightBtn.TextSize = 11
+podiumRightBtn.TextColor3 = themeColors.white
+podiumRightBtn.Parent = podiumDropdown
+Instance.new("UICorner", podiumRightBtn).CornerRadius = UDim.new(0, 5)
+
+-- BUTTON FUNCTIONALITY
+autoTpLeftButton.MouseButton1Click:Connect(function()
+    if IsStealing then return end
+    local animal = getNearestAnimal()
+    if not animal then return end
+
+    local prompt = findPrompt(animal)
+    if not prompt then return end
+
+    buildStealCallbacks(prompt)
+    executeInternalStealAsync(prompt, animal, false)
+end)
+
+autoTpRightButton.MouseButton1Click:Connect(function()
+    if IsStealing then return end
+    local animal = getNearestAnimal()
+    if not animal then return end
+
+    local prompt = findPrompt(animal)
+    if not prompt then return end
+
+    buildStealCallbacks(prompt)
+    executeInternalStealAsync(prompt, animal, true)
+end)
+
+kickButton.MouseButton1Click:Connect(kickSelf)
+
+local podiumDropdownVisible = false
+podiumButton.MouseButton1Click:Connect(function()
+    podiumDropdownVisible = not podiumDropdownVisible
+    podiumDropdown.Visible = podiumDropdownVisible
+    podiumButton.Text = podiumDropdownVisible and "PODIUM ▲" or "PODIUM ▼"
+end)
+
+podiumLeftBtn.MouseButton1Click:Connect(function()
+    local hrp = getHRP()
+    if hrp then
+        hrp.CFrame = spot1_sequence[1]
+        task.wait(0.1)
+        hrp.CFrame = spot1_sequence[2]
+    end
+    podiumDropdownVisible = false
+    podiumDropdown.Visible = false
+    podiumButton.Text = "PODIUM ▼"
+end)
+
+podiumRightBtn.MouseButton1Click:Connect(function()
+    local hrp = getHRP()
+    if hrp then
+        hrp.CFrame = spot2_sequence[1]
+        task.wait(0.1)
+        hrp.CFrame = spot2_sequence[2]
+    end
+    podiumDropdownVisible = false
+    podiumDropdown.Visible = false
+    podiumButton.Text = "PODIUM ▼"
+end)
+
+-- ============================================================
+-- STEAL PROMPT DETECTION
+-- ============================================================
+
+local currentEquipTask = nil
+local isHolding = false
+
+ProximityPromptService.PromptButtonHoldBegan:Connect(function(prompt, plr)
+    if plr ~= player or not semiTPEnabled then return end
+    isHolding = true
+    if currentEquipTask then task.cancel(currentEquipTask) end
+    
+    currentEquipTask = task.spawn(function()
+        task.wait(1)
+        if isHolding and semiTPEnabled then
+            local backpack = player:WaitForChild("Backpack", 2)
+            if backpack then
+                local carpet = backpack:FindFirstChild("Flying Carpet")
+                if carpet and player.Character and player.Character:FindFirstChild("Humanoid") then 
+                    player.Character.Humanoid:EquipTool(carpet) 
+                end
+            end
+        end
+    end)
+end)
+
+ProximityPromptService.PromptButtonHoldEnded:Connect(function(prompt, plr)
+    if plr ~= player then return end
+    isHolding = false
+    if currentEquipTask then task.cancel(currentEquipTask) end
+end)
+
+-- ============================================================
+-- PROMPT TRIGGERED (MAIN TELEPORT)
+-- ============================================================
+
+ProximityPromptService.PromptTriggered:Connect(function(prompt, plr)
+    if plr ~= player or not semiTPEnabled then return end
+
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if root then
+        local d1 = (root.Position - pos1).Magnitude
+        local d2 = (root.Position - pos2).Magnitude
+        local targetPos = d1 < d2 and pos1 or pos2
+        root.CFrame = CFrame.new(targetPos)
+
+        if autoPotionEnabled then
+            local backpack = player:FindFirstChild("Backpack")
+            if backpack then
+                local potion = backpack:FindFirstChild("Giant Potion")
+                if potion and player.Character and player.Character:FindFirstChild("Humanoid") then
+                    player.Character.Humanoid:EquipTool(potion)
+                    task.wait(0.1)
+                    pcall(function()
+                        potion:Activate()
+                    end)
+                end
+            end
+        end
+    end
+    isHolding = false
+end)
+
+-- ============================================================
+-- RESET TO WORK FUNCTION (DESYNC)
+-- ============================================================
+
+local function ResetToWork()
+    local flags = {
+        {"GameNetPVHeaderRotationalVelocityZeroCutoffExponent", "-5000"},
+        {"LargeReplicatorWrite5", "true"},
+        {"LargeReplicatorEnabled9", "true"},
+        {"AngularVelociryLimit", "360"},
+        {"TimestepArbiterVelocityCriteriaThresholdTwoDt", "2147483646"},
+        {"S2PhysicsSenderRate", "15000"},
+        {"DisableDPIScale", "true"},
+        {"MaxDataPacketPerSend", "2147483647"},
+        {"ServerMaxBandwith", "52"},
+        {"PhysicsSenderMaxBandwidthBps", "20000"},
+        {"MaxTimestepMultiplierBuoyancy", "2147483647"},
+        {"SimOwnedNOUCountThresholdMillionth", "2147483647"},
+        {"MaxMissedWorldStepsRemembered", "-2147483648"},
+        {"CheckPVDifferencesForInterpolationMinVelThresholdStudsPerSecHundredth", "1"},
+        {"StreamJobNOUVolumeLengthCap", "2147483647"},
+        {"DebugSendDistInSteps", "-2147483648"},
+        {"MaxTimestepMultiplierAcceleration", "2147483647"},
+        {"LargeReplicatorRead5", "true"},
+        {"SimExplicitlyCappedTimestepMultiplier", "2147483646"},
+        {"GameNetDontSendRedundantNumTimes", "1"},
+        {"CheckPVLinearVelocityIntegrateVsDeltaPositionThresholdPercent", "1"},
+        {"CheckPVCachedRotVelThresholdPercent", "10"},
+        {"LargeReplicatorSerializeRead3", "true"},
+        {"ReplicationFocusNouExtentsSizeCutoffForPauseStuds", "2147483647"},
+        {"NextGenReplicatorEnabledWrite4", "true"},
+        {"CheckPVDifferencesForInterpolationMinRotVelThresholdRadsPerSecHundredth", "1"},
+        {"GameNetDontSendRedundantDeltaPositionMillionth", "1"},
+        {"InterpolationFrameVelocityThresholdMillionth", "5"},
+        {"StreamJobNOUVolumeCap", "2147483647"},
+        {"InterpolationFrameRotVelocityThresholdMillionth", "5"},
+        {"WorldStepMax", "30"},
+        {"TimestepArbiterHumanoidLinearVelThreshold", "1"},
+        {"InterpolationFramePositionThresholdMillionth", "5"},
+        {"TimestepArbiterHumanoidTurningVelThreshold", "1"},
+        {"MaxTimestepMultiplierContstraint", "2147483647"},
+        {"GameNetPVHeaderLinearVelocityZeroCutoffExponent", "-5000"},
+        {"CheckPVCachedVelThresholdPercent", "10"},
+        {"TimestepArbiterOmegaThou", "1073741823"},
+        {"MaxAcceptableUpdateDelay", "1"},
+        {"LargeReplicatorSerializeWrite4", "true"},
+    }
+    for _, data in ipairs(flags) do
+        pcall(function() if setfflag then setfflag(data[1], data[2]) end end)
+    end
+    local char = player.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Dead) end
+        char:ClearAllChildren()
+        local f = Instance.new("Model", workspace)
+        player.Character = f task.wait()
+        player.Character = char f:Destroy()
+    end
+end
+
+-- ============================================================
+-- INITIALIZE SCANNER AND RESET
+-- ============================================================
+
+initializeScanner()
+
+task.spawn(function()
+    task.wait(1)
+    ResetToWork()
+end)
+
+-- ============================================================
+-- DRAGGING FUNCTIONALITY
+-- ============================================================
+
+local dragging, dragStart, startPos
+
+local function update(input)
+    local delta = input.Position - dragStart
+    mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+        
+        TweenService:Create(mainStroke, TweenInfo.new(0.2), {
+            Thickness = 6
+        }):Play()
+        
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                TweenService:Create(mainStroke, TweenInfo.new(0.2), {
+                    Thickness = 5
+                }):Play()
+            end
+        end)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        update(input)
+    end
+end)
+
+-- Animation for UI entrance
+task.spawn(function()
+    task.wait(0.5)
+    TweenService:Create(mainFrame, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Position = UDim2.new(1, -340, 0.5, -120)
+    }):Play()
+end)
+
+print("TOUHINI HUB V2 loaded successfully!")
+
+
+
+
